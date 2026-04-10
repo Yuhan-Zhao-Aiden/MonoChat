@@ -1,0 +1,28 @@
+# Build outputs
+*.o
+*.out
+*.a
+*.so
+*.so.*
+*.dylib
+
+# Debug info
+*.dSYM/
+*.su
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# CMake (if added later)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile.cmake
+
+# Clangd
+compile_commands.json
+.cache/
