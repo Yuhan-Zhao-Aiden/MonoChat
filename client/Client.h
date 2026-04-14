@@ -2,7 +2,8 @@
 #define CLIENT_H
 
 #include "ChatUI.h"
+#include <openssl/ssl.h>
 
-void receiveLoop(int socketFd, MessageQueue& queue);
+void receiveLoop(SSL* ssl, MessageQueue& queue);
 
 #endif

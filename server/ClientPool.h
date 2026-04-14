@@ -5,10 +5,12 @@
 #include <mutex>
 #include <optional>
 #include <memory>
+#include <openssl/ssl.h>
 
 struct ClientInfo {
   int socketFd;
-  std::string username;  
+  std::string username;
+  SSL* ssl = nullptr;
 };
 
 class ClientPool {
@@ -23,7 +25,7 @@ class ClientPool {
   ClientPool& operator=(const ClientPool&) = delete;
 
   // client management
-  bool addClient(int socketFd, const std::string& username);
+  bool addClient(int socketFd, const std::string& username, SSL* ssl = nullptr);
   bool removeBySocket(int socketFd);
   bool removeByUsername(const std::string& username);
 
