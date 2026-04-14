@@ -27,6 +27,11 @@ Makefile.cmake
 compile_commands.json
 .cache/
 
+# Secret
+secret/
+key.pem
+cert.pem
+
 # Custom
 build/
 Documentation/local/

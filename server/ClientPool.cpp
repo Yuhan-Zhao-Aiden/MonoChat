@@ -1,9 +1,8 @@
 #include "ClientPool.h"
 #include <sys/socket.h>
 
-bool ClientPool::addClient(int socketFd, const std::string& username) {
-  if (usernameExists(username)) return false;
-  pool.push_back({ socketFd, username });
+bool ClientPool::addClient(int socketFd, const std::string& username, SSL* ssl) {
+  pool.push_back({ socketFd, username, ssl });
   return true;
 }
 
@@ -78,6 +77,6 @@ void MessageDispatcher::broadcast(
   std::lock_guard<std::mutex> lock(clientPool->getMutex());
   for (auto& client : clientPool->getClients()) {
     if (client.socketFd == excludeSocketFd) continue;
-    send(client.socketFd, message.c_str(), message.size(), 0);
+    SSL_write(client.ssl, message.c_str(), static_cast<int>(message.size()));
   }
 }

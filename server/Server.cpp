@@ -6,11 +6,14 @@
 #include <cstring>
 #include <cerrno>
 #include <csignal>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 #include "Server.h"
 
 // Accessible to the signal handler — must be file-scope.
 static volatile sig_atomic_t g_running = 1;
 static int g_server_fd = -1;
+static SSL_CTX* g_ssl_ctx = nullptr;
 
 static void handle_shutdown(int) {
   g_running = 0;
@@ -19,8 +22,33 @@ static void handle_shutdown(int) {
     shutdown(g_server_fd, SHUT_RDWR);
 }
 
+SSL_CTX* setup_ssl() {
+  SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+  if (!ctx) { ERR_print_errors_fp(stderr); exit(1); }
+
+  const char* cert = getenv("SERVER_CERT");
+  if (!cert) cert = "/app/cert.pem";
+  const char* key  = getenv("SERVER_KEY");
+  if (!key)  key  = "/app/key.pem";
+
+  if (SSL_CTX_use_certificate_file(ctx, cert, SSL_FILETYPE_PEM) <= 0) {
+    ERR_print_errors_fp(stderr); SSL_CTX_free(ctx); exit(1);
+  }
+  if (SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) <= 0) {
+    ERR_print_errors_fp(stderr); SSL_CTX_free(ctx); exit(1);
+  }
+  if (!SSL_CTX_check_private_key(ctx)) {
+    std::cerr << "Certificate and private key do not match\n";
+    SSL_CTX_free(ctx); exit(1);
+  }
+  return ctx;
+}
+
 int main(int argc, char** argv) {
-  if (argc < 2) return 1;
+  if (argc < 2) {
+    std::cerr << "Usage: server <port>\n";
+    return 1;
+  }
   int port = std::stoi(argv[1]);
   std::cout << "Server started on port " << port << " (Ctrl-C to stop)\n";
 
@@ -29,41 +57,62 @@ int main(int argc, char** argv) {
   signal(SIGTERM, handle_shutdown);
 
   g_server_fd = setup(port);
+  g_ssl_ctx = setup_ssl();
   auto pool = std::make_shared<ClientPool>();
 
   while (g_running) {
     int client_fd = accept(g_server_fd, nullptr, nullptr);
     if (client_fd < 0) break;
-    std::thread(client_handler, pool, client_fd).detach();
+
+    SSL* ssl = SSL_new(g_ssl_ctx);
+    SSL_set_fd(ssl, client_fd);
+    if (SSL_accept(ssl) <= 0) {
+      ERR_print_errors_fp(stderr);
+      SSL_free(ssl);
+      close(client_fd);
+      continue;
+    }
+    std::thread(client_handler, pool, client_fd, ssl).detach();
   }
 
   MessageDispatcher::broadcast(pool, "[System]: Server is shutting down.");
   close(g_server_fd);
   g_server_fd = -1;
+  SSL_CTX_free(g_ssl_ctx);
+  g_ssl_ctx = nullptr;
   std::cout << "\nServer stopped.\n";
 }
 
-void client_handler(std::shared_ptr<ClientPool> clientPool, int clientFd) {
+void client_handler(std::shared_ptr<ClientPool> clientPool, int clientFd, SSL* ssl) {
   // 1. Get username
   char buffer[1024];
   std::string name;
   while (true) {
-    int bytes = recv(clientFd, buffer, sizeof(buffer), 0);
+    int bytes = SSL_read(ssl, buffer, sizeof(buffer));
     if (bytes <= 0) {
+      SSL_free(ssl);
       close(clientFd); // client disconnected before sending a username
       return;
     }
-    if (clientPool->usernameExists(std::string(buffer, bytes))) {
-      std::string msg = "Username already exist!";
-      send(clientFd, msg.c_str(), msg.size(), 0);
+
+    // Hold the lock only for the check-and-insert
+    std::string proposed(buffer, bytes);
+    bool taken;
+    {
+      std::lock_guard<std::mutex> lock(clientPool->getMutex());
+      taken = clientPool->usernameExists(proposed);
+      if (!taken)
+        clientPool->addClient(clientFd, proposed, ssl);
+    }
+
+    if (taken) {
+      std::string msg = "Username already taken!";
+      SSL_write(ssl, msg.c_str(), static_cast<int>(msg.size()));
       continue;
     }
 
-    // 2. Add to shared list (with mutex)
-    send(clientFd, "A", 1, 0); // Acknowledge
-    name = std::string(buffer, bytes);
-    std::lock_guard<std::mutex> lock(clientPool->getMutex());
-    clientPool->addClient(clientFd, name);
+    SSL_write(ssl, "A", 1);
+    name = proposed;
     break;
   }
 
@@ -73,7 +122,7 @@ void client_handler(std::shared_ptr<ClientPool> clientPool, int clientFd) {
   // 4. Loop to handle messages (basic for now)
   while (true) {
     char buffer[1024];
-    int bytes = recv(clientFd, buffer, sizeof(buffer) - 1, 0);
+    int bytes = SSL_read(ssl, buffer, sizeof(buffer) - 1);
     if (bytes <= 0) break; // client disconnected or error
     buffer[bytes] = '\0';
     if (strncmp(buffer, "exit", 4) == 0) {
@@ -84,7 +133,7 @@ void client_handler(std::shared_ptr<ClientPool> clientPool, int clientFd) {
     MessageDispatcher::broadcast(clientPool, "[" + name + "]: " + msg, clientFd);
   }
 
-  // 5. Remove from client pool
+  // 5. Remove from client pool (ssl pointer no longer accessible via pool after this)
   {
     std::lock_guard<std::mutex> lock(clientPool->getMutex());
     clientPool->removeByUsername(name);
@@ -93,6 +142,9 @@ void client_handler(std::shared_ptr<ClientPool> clientPool, int clientFd) {
   // 6. Broadcast quit message
   MessageDispatcher::broadcast(clientPool, "[System]: " + name + " has left the chat!");
 
+  // 7. Clean up TLS and socket for this client
+  SSL_shutdown(ssl);
+  SSL_free(ssl);
   close(clientFd);
 }
 
@@ -113,6 +165,6 @@ int setup(int port) {
     close(server_fd);
     exit(1);
   }
-  listen(server_fd, 5);
+  listen(server_fd, SOMAXCONN);
   return server_fd;
 }
