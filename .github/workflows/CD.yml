@@ -101,18 +101,22 @@ jobs:
 
           echo "SSM command ID: ${COMMAND_ID}"
 
-          # Block until the remote command finishes or times out (~5 min)
+          # Block until the remote command finishes or times out (~5 min).
+          # The waiter exits 255 on Failed status — ignore it and check ourselves below.
           aws ssm wait command-executed \
             --command-id  "$COMMAND_ID" \
             --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
-            --region      "$REGION"
+            --region      "$REGION" || true
 
-          STATUS=$(aws ssm get-command-invocation \
+          RESULT=$(aws ssm get-command-invocation \
             --command-id  "$COMMAND_ID" \
             --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
-            --region      "$REGION" \
-            --query       'StatusDetails' \
-            --output      text)
+            --region      "$REGION")
 
+          STATUS=$(echo "$RESULT" | jq -r '.StatusDetails')
+          echo "--- Remote stdout ---"
+          echo "$RESULT" | jq -r '.StandardOutputContent'
+          echo "--- Remote stderr ---"
+          echo "$RESULT" | jq -r '.StandardErrorContent'
           echo "Deployment status: ${STATUS}"
           [[ "${STATUS}" == "Success" ]] || exit 1
